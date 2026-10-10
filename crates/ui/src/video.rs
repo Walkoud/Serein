@@ -1,6 +1,7 @@
 //! Inline player: one bounded texture with Discord-style overlay controls. The desktop owns
 //! media decoding and playback; this module only draws frames and emits commands.
 use model::{Attachment, Id, Message};
+use std::collections::{HashMap, HashSet};
 
 const CORNER: u8 = 8;
 const MAX_WIDTH: f32 = crate::avatars::media::MEDIA_MAX_WIDTH;
@@ -19,6 +20,8 @@ pub enum VideoState {
 }
 pub enum VideoCommand {
 	Play(Attachment),
+	/// Decode one first frame for an idle stage poster; never starts playback.
+	Poster(Attachment),
 	Pause(bool),
 	Seek(f64),
 	Volume(f32),
@@ -39,6 +42,11 @@ pub struct VideoUi {
 	frame: Option<std::sync::Arc<egui::ColorImage>>,
 	/// Vertical transparent-to-black ramp behind the overlay controls.
 	shade: Option<egui::TextureHandle>,
+	/// Decoded first frames by attachment id, painted on idle stages instead of
+	/// black. Bounded below; Discord ships no video placeholders to reuse.
+	posters: HashMap<Id, egui::TextureHandle>,
+	/// Attachments already asked (or answered) for a poster; no retry until eviction.
+	poster_seen: HashSet<Id>,
 	/// Keyboard focus rested on an overlay control last frame, so keep the overlay visible.
 	controls_focused: bool,
 	/// Keep the viewport's previous mode so leaving playback restores the window.
@@ -59,6 +67,8 @@ impl Default for VideoUi {
 			texture: None,
 			frame: None,
 			shade: None,
+			posters: HashMap::new(),
+			poster_seen: HashSet::new(),
 			controls_focused: false,
 			fullscreen: None,
 			fullscreen_request: None,
@@ -208,6 +218,50 @@ impl VideoUi {
 			})
 			.id()
 	}
+	/// Caches one decoded poster frame; same bounds as [`VideoUi::accept_frame`]
+	/// but independent of the active playback, so idle stages keep their preview.
+	pub fn accept_poster(
+		&mut self,
+		ctx: &egui::Context,
+		id: Id,
+		width: usize,
+		height: usize,
+		rgba: &[u8],
+	) -> bool {
+		if width == 0
+			|| height == 0
+			|| width > 1920
+			|| height > 1920
+			|| width * height > 1920 * 1080
+			|| rgba.len() != width * height * 4
+		{
+			return false;
+		}
+		if self.posters.len() >= 8 {
+			self.posters.clear();
+			self.poster_seen.clear();
+		}
+		let image = egui::ColorImage {
+			size: [width, height],
+			source_size: egui::vec2(width as f32, height as f32),
+			pixels: rgba
+				.as_chunks::<4>()
+				.0
+				.iter()
+				.map(|&[r, g, b, a]| egui::Color32::from_rgba_unmultiplied(r, g, b, a))
+				.collect(),
+		};
+		self.posters.insert(
+			id,
+			ctx.load_texture("inline-video-poster", image, egui::TextureOptions::LINEAR),
+		);
+		self.poster_seen.insert(id);
+		true
+	}
+	/// Records an undecodable poster so the stage is not requested again until eviction.
+	pub fn poster_failed(&mut self, id: Id) {
+		self.poster_seen.insert(id);
+	}
 	pub fn show(
 		&mut self,
 		ui: &mut egui::Ui,
@@ -255,6 +309,29 @@ impl VideoUi {
 		});
 		let painter = ui.painter().with_clip_rect(stage);
 		painter.rect_filled(stage, CORNER, egui::Color32::BLACK);
+		if self.texture.as_ref().filter(|_| active).is_none() {
+			if let Some(poster) = self.posters.get(&attachment.id) {
+				let size = poster.size_vec2();
+				if size.x > 0.0 && size.y > 0.0 {
+					let scale = (stage.width() / size.x).max(stage.height() / size.y);
+					let rect = egui::Rect::from_center_size(stage.center(), size * scale);
+					egui::Image::new(egui::load::SizedTexture::new(poster.id(), rect.size()))
+						.corner_radius(CORNER)
+						.paint_at(ui, rect);
+				}
+			} else if state == VideoState::Idle
+				&& !self.poster_seen.contains(&attachment.id)
+				&& self.command.is_none()
+				&& attachment.size > 0
+				&& attachment.size <= 100 * 1024 * 1024
+				&& ui.is_rect_visible(stage)
+			{
+				// One request per attachment; the desktop answers through
+				// `accept_poster`/`poster_failed`, playback still starts on click.
+				self.poster_seen.insert(attachment.id);
+				self.command = Some(VideoCommand::Poster(attachment.clone()));
+			}
+		}
 		if let Some(texture) = self.texture.as_ref().filter(|_| active) {
 			let size = texture.size_vec2();
 			let scale = (stage.width() / size.x).min(stage.height() / size.y);
@@ -804,7 +881,11 @@ mod tests {
 				.drop_without_applying_deltas();
 			};
 			frame(&mut video, None);
-			assert!(video.command.is_none() && video.active.is_none());
+			// An idle poster request is benign; only playback commands matter here.
+			assert!(
+				matches!(video.command, None | Some(VideoCommand::Poster(_)))
+					&& video.active.is_none()
+			);
 			assert!(!video.accept_frame(&ctx, 1, 1, &[0, 0, 0, 255]));
 			for key in [egui::Key::Tab, egui::Key::Enter] {
 				frame(&mut video, Some(key));
@@ -853,5 +934,72 @@ mod tests {
 			assert!(video.active.is_none() && video.texture.is_none());
 			assert!(matches!(video.command, Some(VideoCommand::Stop)));
 		}
+	}
+	#[test]
+	fn idle_stage_requests_and_paints_one_decoded_poster() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		let message = test_support::message(1, Id(2));
+		let attachment = Attachment {
+			id: Id(3),
+			filename: "clip.mp4".into(),
+			description: None,
+			content_type: Some("video/mp4".into()),
+			size: 128,
+			media: model::EmbedMedia {
+				width: 720,
+				height: 1280,
+				..Default::default()
+			},
+			spoiler: false,
+			duration_ms: Some(11_817),
+			waveform: Vec::new(),
+		};
+		let mut video = VideoUi::default();
+		let show = |video: &mut VideoUi| {
+			ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(436.0, 600.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					ui.set_width(420.0);
+					video.show(
+						ui,
+						&message,
+						&attachment,
+						&mut crate::attachments::DownloadUi::default(),
+						&mut None,
+						false,
+					);
+				},
+			)
+			.drop_without_applying_deltas();
+		};
+		show(&mut video);
+		// One poster request, still idle: playback never starts on its own.
+		assert!(
+			matches!(video.command.take(), Some(VideoCommand::Poster(file)) if file == attachment)
+		);
+		assert!(video.active.is_none());
+		// A second frame does not request again while the answer is pending.
+		show(&mut video);
+		assert!(video.command.is_none());
+		// Bounds match the playback path; failures never cache a texture.
+		assert!(!video.accept_poster(&ctx, Id(3), 0, 1, &[]));
+		assert!(!video.accept_poster(&ctx, Id(3), 1921, 1, &[]));
+		assert!(!video.accept_poster(&ctx, Id(3), 1, 1, &[0]));
+		assert!(video.posters.is_empty());
+		video.poster_failed(Id(9));
+		assert!(video.posters.is_empty());
+		// The decoded answer is cached and painted without further requests.
+		assert!(video.accept_poster(&ctx, Id(3), 2, 1, &[9, 9, 9, 255, 1, 1, 1, 255]));
+		assert_eq!(video.posters.len(), 1);
+		show(&mut video);
+		assert!(video.command.is_none());
+		assert_eq!(video.posters.len(), 1);
 	}
 }

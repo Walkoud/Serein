@@ -43,10 +43,22 @@ struct Request {
 	url: Option<url::Url>,
 	size: usize,
 }
+/// One idle-stage poster: decode a single first frame, never playback.
+struct PosterJob {
+	id: model::Id,
+	url: Option<url::Url>,
+	size: usize,
+}
+struct PosterDone {
+	id: model::Id,
+	frame: Option<(u32, u32, Vec<u8>)>,
+}
 #[derive(Default)]
 pub struct Video {
 	session: Option<Arc<Session>>,
 	requests: Option<tokio::sync::watch::Sender<Option<Request>>>,
+	poster_jobs: Option<std::sync::mpsc::Sender<PosterJob>>,
+	poster_results: Arc<Mutex<Vec<PosterDone>>>,
 }
 impl Video {
 	pub fn stop(&mut self) {
@@ -58,6 +70,17 @@ impl Video {
 		}
 	}
 	pub fn poll(&self, player: &mut VideoUi, ctx: &eframe::egui::Context) {
+		// Posters belong to idle stages, so they drain even with no active session.
+		if let Ok(mut results) = self.poster_results.try_lock() {
+			for done in results.drain(..) {
+				match done.frame {
+					Some((width, height, rgba)) => {
+						player.accept_poster(ctx, done.id, width as usize, height as usize, &rgba);
+					}
+					None => player.poster_failed(done.id),
+				}
+			}
+		}
 		let Some(session) = &self.session else {
 			return;
 		};
@@ -87,6 +110,9 @@ impl Video {
 				if let Err(error) = self.start(attachment, player.volume, runtime, ctx, demo) {
 					player.state = VideoState::Failed(error);
 				}
+			}
+			VideoCommand::Poster(attachment) => {
+				self.poster(attachment, player, runtime, ctx, demo);
 			}
 			VideoCommand::Pause(paused) => {
 				if let Some(s) = &self.session {
@@ -167,6 +193,93 @@ impl Video {
 		self.session = Some(session);
 		Ok(())
 	}
+	/// Queues one idle-stage poster; failures surface through `poll`, never playback state.
+	fn poster(
+		&mut self,
+		attachment: model::Attachment,
+		player: &mut VideoUi,
+		runtime: &tokio::runtime::Handle,
+		ctx: &eframe::egui::Context,
+		demo: bool,
+	) {
+		let id = attachment.id;
+		if attachment.size == 0 || attachment.size > 100 * 1024 * 1024 {
+			player.poster_failed(id);
+			return;
+		}
+		let url = if demo {
+			None
+		} else {
+			match crate::downloads::original_url(&attachment) {
+				Some(url) => Some(url),
+				None => {
+					player.poster_failed(id);
+					return;
+				}
+			}
+		};
+		if self.poster_jobs.is_none() {
+			let (sender, receiver) = std::sync::mpsc::channel::<PosterJob>();
+			let runtime = runtime.clone();
+			let ctx = ctx.clone();
+			let results = self.poster_results.clone();
+			if std::thread::Builder::new()
+				.name("serein-video-poster".into())
+				.spawn(move || {
+					while let Ok(job) = receiver.recv() {
+						let frame = decode_poster(&job, &runtime);
+						if let Ok(mut results) = results.lock() {
+							results.push(PosterDone { id: job.id, frame });
+						}
+						ctx.request_repaint();
+					}
+				})
+				.is_err()
+			{
+				player.poster_failed(id);
+				return;
+			}
+			self.poster_jobs = Some(sender);
+		}
+		if self.poster_jobs.as_ref().is_some_and(|jobs| {
+			jobs.send(PosterJob {
+				id,
+				url,
+				size: attachment.size as usize,
+			})
+			.is_ok()
+		}) {
+			return;
+		}
+		player.poster_failed(id);
+	}
+}
+
+/// Opens the attachment and returns its first decoded video frame; bounded reads only.
+fn decode_poster(job: &PosterJob, runtime: &tokio::runtime::Handle) -> Option<(u32, u32, Vec<u8>)> {
+	use platform::video::Sample;
+	use std::task::Poll::Ready;
+	let source = source::source(
+		job.url.clone(),
+		job.size,
+		Arc::new(AtomicBool::new(false)),
+		runtime.clone(),
+	)
+	.ok()?;
+	let mut decoder = platform::video::Decoder::open(source).ok()?;
+	for _ in 0..512 {
+		match decoder.poll_video().ok()? {
+			Ready(Some(Sample::Video {
+				width,
+				height,
+				rgba,
+				..
+			})) => return Some((width, height, rgba)),
+			Ready(None) => return None,
+			_ => {}
+		}
+	}
+	None
 }
 impl Drop for Video {
 	fn drop(&mut self) {

@@ -145,14 +145,19 @@ fn select_media_menu(
 		.drop_without_applying_deltas();
 	}
 	assert!(viewing.is_none() && opening.is_none());
+	// An idle poster request is benign; context clicks must not drive playback.
 	assert!(
-		video.command.is_none(),
+		matches!(
+			video.command,
+			None | Some(crate::video::VideoCommand::Poster(_))
+		),
 		"context click triggered {} at {control:?}",
 		match &video.command {
 			Some(crate::video::VideoCommand::Seek(_)) => "seek",
 			Some(crate::video::VideoCommand::Volume(_)) => "volume",
 			Some(crate::video::VideoCommand::Pause(_)) => "pause",
 			Some(crate::video::VideoCommand::Play(_)) => "play",
+			Some(crate::video::VideoCommand::Poster(_)) => "poster",
 			Some(crate::video::VideoCommand::Stop) => "stop",
 			None => "no command",
 		}
