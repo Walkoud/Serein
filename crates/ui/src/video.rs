@@ -1,7 +1,11 @@
 //! Inline player: one bounded texture with Discord-style overlay controls. The desktop owns
 //! media decoding and playback; this module only draws frames and emits commands.
 use model::{Attachment, Id, Message};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Poster pixel budget: 8 MiB RGBA, about three dozen 320px posters. Oldest goes
+/// first; evicted attachments may request again, cached ones never re-download.
+const POSTER_BUDGET: usize = 8 * 1024 * 1024;
 
 const CORNER: u8 = 8;
 const MAX_WIDTH: f32 = crate::avatars::media::MEDIA_MAX_WIDTH;
@@ -43,8 +47,12 @@ pub struct VideoUi {
 	/// Vertical transparent-to-black ramp behind the overlay controls.
 	shade: Option<egui::TextureHandle>,
 	/// Decoded first frames by attachment id, painted on idle stages instead of
-	/// black. Bounded below; Discord ships no video placeholders to reuse.
-	posters: HashMap<Id, egui::TextureHandle>,
+	/// black. Byte-bounded below; Discord ships no video placeholders to reuse.
+	posters: HashMap<Id, (egui::TextureHandle, usize)>,
+	/// Oldest-first poster insertion order for budget eviction.
+	poster_order: VecDeque<Id>,
+	/// Live poster bytes against [`POSTER_BUDGET`].
+	poster_bytes: usize,
 	/// Attachments already asked (or answered) for a poster; no retry until eviction.
 	poster_seen: HashSet<Id>,
 	/// Keyboard focus rested on an overlay control last frame, so keep the overlay visible.
@@ -68,6 +76,8 @@ impl Default for VideoUi {
 			frame: None,
 			shade: None,
 			posters: HashMap::new(),
+			poster_order: VecDeque::new(),
+			poster_bytes: 0,
 			poster_seen: HashSet::new(),
 			controls_focused: false,
 			fullscreen: None,
@@ -237,9 +247,14 @@ impl VideoUi {
 		{
 			return false;
 		}
-		if self.posters.len() >= 8 {
-			self.posters.clear();
-			self.poster_seen.clear();
+		let bytes = rgba.len();
+		// Reinserting refreshes recency; eviction below drops textures (GPU freed).
+		self.evict_poster(&id);
+		while self.poster_bytes + bytes > POSTER_BUDGET {
+			let Some(oldest) = self.poster_order.pop_front() else {
+				break;
+			};
+			self.evict_poster(&oldest);
 		}
 		let image = egui::ColorImage {
 			size: [width, height],
@@ -253,10 +268,23 @@ impl VideoUi {
 		};
 		self.posters.insert(
 			id,
-			ctx.load_texture("inline-video-poster", image, egui::TextureOptions::LINEAR),
+			(
+				ctx.load_texture("inline-video-poster", image, egui::TextureOptions::LINEAR),
+				bytes,
+			),
 		);
+		self.poster_order.push_back(id);
+		self.poster_bytes += bytes;
 		self.poster_seen.insert(id);
 		true
+	}
+	/// Drops one cached poster and its retry guard, freeing its budget share.
+	fn evict_poster(&mut self, id: &Id) {
+		if let Some((_, bytes)) = self.posters.remove(id) {
+			self.poster_bytes = self.poster_bytes.saturating_sub(bytes);
+			self.poster_order.retain(|queued| queued != id);
+			self.poster_seen.remove(id);
+		}
 	}
 	/// Records an undecodable poster so the stage is not requested again until eviction.
 	pub fn poster_failed(&mut self, id: Id) {
@@ -310,7 +338,7 @@ impl VideoUi {
 		let painter = ui.painter().with_clip_rect(stage);
 		painter.rect_filled(stage, CORNER, egui::Color32::BLACK);
 		if self.texture.as_ref().filter(|_| active).is_none() {
-			if let Some(poster) = self.posters.get(&attachment.id) {
+			if let Some((poster, _)) = self.posters.get(&attachment.id) {
 				let size = poster.size_vec2();
 				if size.x > 0.0 && size.y > 0.0 {
 					let scale = (stage.width() / size.x).max(stage.height() / size.y);
@@ -998,8 +1026,19 @@ mod tests {
 		// The decoded answer is cached and painted without further requests.
 		assert!(video.accept_poster(&ctx, Id(3), 2, 1, &[9, 9, 9, 255, 1, 1, 1, 255]));
 		assert_eq!(video.posters.len(), 1);
+		assert_eq!(video.poster_bytes, 2 * 1 * 4);
 		show(&mut video);
 		assert!(video.command.is_none());
 		assert_eq!(video.posters.len(), 1);
+		// Budget eviction drops the oldest texture and its retry guard together.
+		let big = vec![7; 1920 * 1080 * 4];
+		assert!(video.accept_poster(&ctx, Id(4), 1920, 1080, &big));
+		assert_eq!(video.posters.len(), 2);
+		assert!(video.accept_poster(&ctx, Id(5), 1920, 1080, &big));
+		assert_eq!(video.posters.len(), 1);
+		assert!(!video.posters.contains_key(&Id(3)));
+		assert!(!video.posters.contains_key(&Id(4)));
+		assert!(!video.poster_seen.contains(&Id(3)));
+		assert!(video.poster_bytes <= POSTER_BUDGET);
 	}
 }
