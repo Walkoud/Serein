@@ -255,7 +255,8 @@ impl Video {
 	}
 }
 
-/// Opens the attachment and returns its first decoded video frame; bounded reads only.
+/// Opens the attachment and returns its first decoded video frame, downscaled for
+/// a light poster; bounded reads only.
 fn decode_poster(job: &PosterJob, runtime: &tokio::runtime::Handle) -> Option<(u32, u32, Vec<u8>)> {
 	use platform::video::Sample;
 	use std::task::Poll::Ready;
@@ -274,12 +275,54 @@ fn decode_poster(job: &PosterJob, runtime: &tokio::runtime::Handle) -> Option<(u
 				height,
 				rgba,
 				..
-			})) => return Some((width, height, rgba)),
+			})) => return Some(downscale_poster(width, height, rgba)),
 			Ready(None) => return None,
 			_ => {}
 		}
 	}
 	None
+}
+
+/// Longest poster edge in pixels; a 1080p frame shrinks ~10x before caching.
+const POSTER_EDGE: u32 = 320;
+
+/// Area-average downscale to [`POSTER_EDGE`]; small frames pass through untouched.
+fn downscale_poster(width: u32, height: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
+	let edge = width.max(height);
+	if edge <= POSTER_EDGE
+		|| width == 0
+		|| height == 0
+		|| rgba.len() != width as usize * height as usize * 4
+	{
+		return (width, height, rgba);
+	}
+	let out_width = (u64::from(width) * u64::from(POSTER_EDGE) / u64::from(edge)).max(1) as u32;
+	let out_height = (u64::from(height) * u64::from(POSTER_EDGE) / u64::from(edge)).max(1) as u32;
+	let mut out = vec![0; out_width as usize * out_height as usize * 4];
+	for y in 0..out_height {
+		let y0 = y * height / out_height;
+		let y1 = ((y + 1) * height / out_height).max(y0 + 1);
+		for x in 0..out_width {
+			let x0 = x * width / out_width;
+			let x1 = ((x + 1) * width / out_width).max(x0 + 1);
+			let mut sum = [0_u64; 4];
+			let mut count = 0_u64;
+			for sy in y0..y1 {
+				for sx in x0..x1 {
+					let pixel = &rgba[(sy as usize * width as usize + sx as usize) * 4..][..4];
+					for (acc, byte) in sum.iter_mut().zip(pixel) {
+						*acc += u64::from(*byte);
+					}
+					count += 1;
+				}
+			}
+			let pixel = &mut out[(y as usize * out_width as usize + x as usize) * 4..][..4];
+			for (slot, acc) in pixel.iter_mut().zip(sum) {
+				*slot = (acc / count) as u8;
+			}
+		}
+	}
+	(out_width, out_height, out)
 }
 impl Drop for Video {
 	fn drop(&mut self) {
@@ -676,5 +719,30 @@ mod tests {
 			assert_eq!(session.update.lock().unwrap().state, VideoState::Ended);
 			assert!(session.update.lock().unwrap().position > 2.8);
 		}
+	}
+}
+
+#[cfg(test)]
+mod poster_tests {
+	use super::*;
+	#[test]
+	fn downscale_shrinks_and_averages() {
+		// 4x2 gradient: left half black, right half white.
+		let mut rgba = vec![0; 4 * 2 * 4];
+		for pixel in rgba.chunks_exact_mut(4).skip(4) {
+			pixel.copy_from_slice(&[255, 255, 255, 255]);
+		}
+		let (width, height, small) = downscale_poster(4, 2, rgba);
+		assert_eq!((width, height, small.len()), (4, 2, 4 * 2 * 4));
+		// A 640x480 frame lands on a 320px edge with averaged texels.
+		let wide = vec![128; 640 * 480 * 4];
+		let (width, height, small) = downscale_poster(640, 480, wide);
+		assert_eq!((width, height), (320, 240));
+		assert_eq!(small.len(), 320 * 240 * 4);
+		assert!(small.iter().all(|&byte| byte == 128));
+		let tall = vec![64; 720 * 1280 * 4];
+		let (width, height, small) = downscale_poster(720, 1280, tall);
+		assert_eq!((width, height), (180, 320));
+		assert_eq!(small.len(), 180 * 320 * 4);
 	}
 }
