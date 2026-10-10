@@ -6751,9 +6751,12 @@ impl eframe::App for Desktop {
 					self.demo_video_autoplay = None;
 				}
 			}
-			if !player.seen
-				|| player.active.is_none()
-				|| (!self.state.demo && self.state.auth != AuthState::Authenticated)
+			// A queued command (poster request, play, ...) must survive this
+			// frame: synthesizing Stop here would discard it before delivery.
+			if player.command.is_none()
+				&& (!player.seen
+					|| player.active.is_none()
+					|| (!self.state.demo && self.state.auth != AuthState::Authenticated))
 			{
 				self.video.stop();
 				player.stop();
