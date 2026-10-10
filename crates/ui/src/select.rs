@@ -41,6 +41,7 @@ struct Embed {
 struct Overlay {
 	id: egui::Id,
 	rect: Rect,
+	sense: Sense,
 }
 
 /// One text block's runs, in layout order.
@@ -96,6 +97,7 @@ impl Surface {
 			self.overlays.push(Overlay {
 				id: response.id,
 				rect: response.rect,
+				sense: response.sense,
 			});
 		}
 	}
@@ -148,6 +150,19 @@ impl Surface {
 			galley_pos,
 			galley,
 		});
+	}
+
+	/// True when `pos` is on no glyph line, widget or excluded card of this block, so a
+	/// row gesture there cannot be a word selection, link or media interaction.
+	pub fn blank_at(&self, pos: Pos2) -> bool {
+		!self
+			.runs
+			.iter()
+			.flat_map(|run| &run.lines)
+			.chain(self.embeds.iter().map(|embed| &embed.response.rect))
+			.chain(self.holes.iter().map(|hole| &hole.rect))
+			.chain(self.overlays.iter().map(|over| &over.rect))
+			.any(|rect| rect.contains(pos))
 	}
 
 	/// Tile the block and register selection on the remaining bands.
@@ -239,7 +254,7 @@ impl Surface {
 			ui.interact_opt(
 				over.rect,
 				over.id,
-				Sense::click(),
+				over.sense,
 				InteractOptions { move_to_top: true },
 			);
 		}
@@ -393,6 +408,11 @@ pub fn install(ctx: &egui::Context) {
 /// True when a label range is active.
 pub fn has_selection(ctx: &egui::Context) -> bool {
 	ctx.plugin::<LabelSelectionState>().lock().has_selection()
+}
+
+/// Drop a label range, e.g. the word a row double-click selected beside its text.
+pub fn clear(ctx: &egui::Context) {
+	ctx.plugin::<LabelSelectionState>().lock().clear_selection();
 }
 
 pub fn open_menu(ctx: &egui::Context) -> bool {

@@ -27,6 +27,8 @@ pub struct Menu {
 	dismissed: bool,
 	/// Keyboard moved the highlight; scroll the popout so it stays visible.
 	follow: bool,
+	/// Leave custom emoji that need Nitro out of `:` suggestions.
+	pub hide_nitro_emojis: bool,
 }
 pub struct Pick {
 	range: Range<usize>,
@@ -63,6 +65,7 @@ enum Candidate {
 		id: Id,
 		name: String,
 		animated: bool,
+		image_fallback: bool,
 		server: String,
 	},
 }
@@ -90,8 +93,23 @@ impl Candidate {
 			Candidate::Channel { id, .. } => format!("<#{id}> "),
 			Candidate::Unicode { text, .. } => format!("{text} "),
 			Candidate::Custom {
-				id, name, animated, ..
+				id,
+				name,
+				animated,
+				image_fallback,
+				..
 			} => {
+				if *image_fallback {
+					return format!(
+						"{} ",
+						model::ImageShare::Emoji {
+							id: *id,
+							animated: *animated
+						}
+						.markdown(name)
+						.unwrap_or_default()
+					);
+				}
 				format!("<{}:{name}:{id}> ", if *animated { "a" } else { "" })
 			}
 		}
@@ -274,7 +292,15 @@ pub fn presentation_fingerprint(state: &State, message: &model::Message) -> u64 
 		channel: message.channel,
 	};
 	let roles = known_roles(state, message.channel);
-	let mut rest = message.content.as_str();
+	let content = &message.content[..message
+		.content
+		.floor_char_boundary(crate::markdown::MAX_INPUT)];
+	// Reuse the metadata revision: types, parents, guilds and resolved names can all
+	// change pill geometry. Message traffic is filtered out; no Markdown parse is needed.
+	if content.contains("<#") || content.contains("/channels/") {
+		state.channel_labels_revision().hash(&mut hasher);
+	}
+	let mut rest = content;
 	let mut seen = 0usize;
 	while seen < model::MAX_MENTIONS {
 		let Some(start) = rest.find('<') else {
@@ -291,18 +317,7 @@ pub fn presentation_fingerprint(state: &State, message: &model::Message) -> u64 
 				.map_or_else(|| format!("unknown-role ({id})"), |role| role.name.clone());
 			format!("@{name}").hash(&mut hasher);
 			rest = &rest[len..];
-		} else if let Some((id, len)) = model::channel_mention_prefix(rest) {
-			let label = match state.channels.iter().find(|channel| channel.id == id) {
-				Some(channel)
-					if channel.guild.is_some()
-						&& matches!(channel.kind, 0 | 5 | 10..=12 | 15 | 16) =>
-				{
-					format!("#{}", channel.name)
-				}
-				Some(_) => String::new(),
-				None => "#unknown-channel".into(),
-			};
-			label.hash(&mut hasher);
+		} else if let Some((_, len)) = model::channel_mention_prefix(rest) {
 			rest = &rest[len..];
 		} else {
 			let skip = rest.chars().next().map_or(1, char::len_utf8);
@@ -450,7 +465,10 @@ impl Menu {
 		users: &[User],
 	) {
 		let Some((range, query, kind)) = cursor.and_then(|cursor| query(draft, cursor)) else {
-			*self = Self::default();
+			*self = Self {
+				hide_nitro_emojis: self.hide_nitro_emojis,
+				..Self::default()
+			};
 			return;
 		};
 		if self.channel != Some(channel)
@@ -555,14 +573,18 @@ impl Menu {
 					let source_match = rank(&query, &guild.name, Id(0)).map(|_| 2);
 					for emoji in guild.emojis.iter().flatten() {
 						if let Some(rank) = rank(&query, &emoji.name, Id(0)).or(source_match)
-							&& state
+							&& emoji.valid() && (state.can_send(channel)
+							|| state
 								.custom_emoji_unavailable_reason(channel, guild.id, emoji)
-								.is_none()
+								.is_none()) && !(self.hide_nitro_emojis
+							&& state.custom_emoji_requires_nitro(channel, guild.id, emoji))
 						{
 							push_emoji(&mut out, (rank, 0, emoji.id.0), || Candidate::Custom {
 								id: emoji.id,
 								name: emoji.name.clone(),
 								animated: emoji.animated,
+								image_fallback: !state
+									.can_send_custom_emoji(channel, guild.id, emoji),
 								server: guild.name.chars().take(120).collect(),
 							});
 						}
@@ -899,6 +921,116 @@ mod tests {
 	use model::Channel;
 
 	#[test]
+	fn pill_fingerprints_follow_navigation_metadata_without_message_churn() {
+		let mut state = test_support::demo_state();
+		let messages = [
+			("<#28>", Id(20)),
+			("https://discord.com/channels/10/27/501", Id(20)),
+			("https://discord.com/channels/10/27/501", Id(999)),
+			("Plain text", Id(20)),
+		]
+		.map(|(content, channel)| {
+			let mut message = test_support::message(600, channel);
+			message.content = content.into();
+			message
+		});
+		let fingerprints = |state: &State| {
+			messages
+				.each_ref()
+				.map(|message| presentation_fingerprint(state, message))
+		};
+		let before = fingerprints(&state);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event: client_core::Event::Message(test_support::message(601, Id(20))),
+		});
+		assert_eq!(fingerprints(&state), before);
+		for (id, name, kind, parent) in [
+			(28, "Renamed thread", 11, 20),
+			(28, "Renamed thread", 12, 20),
+			(28, "Renamed thread", 11, 26),
+			(26, "Longer forum parent name", 15, 24),
+		] {
+			let before = fingerprints(&state);
+			let mut updated = state.channel(Id(id)).unwrap().clone();
+			updated.name = name.into();
+			updated.kind = kind;
+			updated.parent_id = Some(Id(parent));
+			state.apply(client_core::Envelope {
+				generation: state.generation,
+				event: client_core::Event::ChannelCreated(updated),
+			});
+			let after = fingerprints(&state);
+			assert!(before[..3].iter().zip(&after[..3]).all(|(a, b)| a != b));
+			assert_eq!(before[3], after[3]);
+		}
+		let before = fingerprints(&state);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event: client_core::Event::GuildChanged(model::GuildPatch {
+				id: Id(10),
+				name: model::Patch::Value("Longer foreign server name".into()),
+				icon: model::Patch::Value("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+				default_message_notifications: model::Patch::Absent,
+			}),
+		});
+		assert_ne!(fingerprints(&state)[2], before[2]);
+		let before = fingerprints(&state);
+		let mut source = state.channel(Id(20)).unwrap().clone();
+		source.id = Id(999);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event: client_core::Event::ChannelCreated(source),
+		});
+		assert_ne!(fingerprints(&state)[2], before[2]);
+	}
+
+	#[test]
+	fn pill_fingerprints_cover_retained_reference_names_and_bound_source_scanning() {
+		let mut state = test_support::demo_state();
+		let mut message = test_support::message(600, Id(20));
+		message.content = "<#77> <#78>".into();
+		for id in [77, 78] {
+			let before = presentation_fingerprint(&state, &message);
+			let Some(client_core::Command::ChannelAction { request, .. }) =
+				state.request_channel_reference(Id(10), Id(id))
+			else {
+				panic!("synthetic reference request");
+			};
+			let mut thread = state.channel(Id(28)).unwrap().clone();
+			thread.id = Id(id);
+			thread.name = format!("Resolved thread {id}");
+			state.apply(client_core::Envelope {
+				generation: state.generation,
+				event: client_core::Event::ChannelAction(
+					client_core::channel_actions::Event::Finished {
+						guild: Id(10),
+						channel: Id(id),
+						request,
+						result: Ok(client_core::channel_actions::Outcome::Channel {
+							channel: Box::new(thread),
+							permissions: None,
+						}),
+					},
+				),
+			});
+			assert_ne!(presentation_fingerprint(&state, &message), before);
+		}
+		assert!(state.channel(Id(77)).is_none());
+		assert_eq!(
+			state.channel_reference_name(Id(77)),
+			Some("Resolved thread 77")
+		);
+		message.content = format!(
+			"{}é<#28> https://discord.com/channels/10/27/501",
+			"a".repeat(crate::markdown::MAX_INPUT - 1)
+		);
+		let before = presentation_fingerprint(&state, &message);
+		state.invalidate_navigation();
+		assert_eq!(presentation_fingerprint(&state, &message), before);
+	}
+
+	#[test]
 	fn loaded_members_remain_suggested_and_admitted_beyond_the_candidate_cap() {
 		let mut state = test_support::demo_state();
 		// Synthetic authenticated reducer state; no transport consumes these commands.
@@ -1070,7 +1202,10 @@ mod tests {
 		);
 		let mut draft = ":same".into();
 		insert(&mut draft, menu.pick(0).unwrap(), true).unwrap();
-		assert_eq!(draft, "<a:same_wave:10001> ");
+		assert_eq!(
+			draft,
+			r"[same\_wave](https://cdn.discordapp.com/emojis/10001.gif?size=64) "
+		);
 		menu.refresh(&state, Id(2), ":source20", Some(9), &[]);
 		assert_eq!(menu.candidates[0].id(), Id(20001));
 		assert!(menu.candidates.iter().all(
@@ -1142,6 +1277,8 @@ mod tests {
 								id: guild,
 								name: String::new(),
 								color: 0,
+								secondary_color: None,
+								tertiary_color: None,
 								position: 0,
 								hoist: false,
 								bits: p::VIEW_CHANNEL | p::SEND_MESSAGES | p::MENTION_EVERYONE,
@@ -1174,7 +1311,7 @@ mod tests {
 			edit_state
 				.cursor
 				.set_char_range(Some(egui::text::CCursorRange::one(
-					egui::text::CCursor::new(draft.chars().count()),
+					egui::text::CCursor::end_of_str(draft),
 				)));
 			edit_state.store(&ctx, editor);
 			let mut output = ctx.run_ui(
@@ -1394,7 +1531,7 @@ mod tests {
 				},
 			]),
 		}];
-		let state = State {
+		let mut state = State {
 			guilds,
 			channels: vec![channel(1, None, 1, "DM")],
 			user: Some(user(7, "Owner")),
@@ -1419,8 +1556,13 @@ mod tests {
 				.any(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":heart:"))
 		);
 		let mut draft = "hi :he".to_owned();
-		assert_eq!(insert(&mut draft, menu.pick(0).unwrap(), true), Some(31));
-		assert_eq!(draft, "hi <a:heart_hands_custom:9001> ");
+		let expected =
+			r"hi [heart\_hands\_custom](https://cdn.discordapp.com/emojis/9001.gif?size=64) ";
+		assert_eq!(
+			insert(&mut draft, menu.pick(0).unwrap(), true),
+			Some(expected.chars().count())
+		);
+		assert_eq!(draft, expected);
 		let unicode = menu
 			.candidates
 			.iter()
@@ -1429,6 +1571,24 @@ mod tests {
 		let mut draft = "hi :he".to_owned();
 		insert(&mut draft, menu.pick(unicode).unwrap(), true).unwrap();
 		assert_eq!(draft, "hi ❤️ ");
+		// Opting out of Nitro-only suggestions drops the animated, other-server emoji only.
+		menu.hide_nitro_emojis = true;
+		menu.refresh(&state, Id(1), "x", None, &[]);
+		menu.refresh(&state, Id(1), "hi :he", Some(6), &[]);
+		assert!(
+			menu.hide_nitro_emojis,
+			"the preference survives a closed menu"
+		);
+		assert!(!menu.candidates.iter().any(|c| c.id() == Id(9001)));
+		assert!(
+			menu.candidates
+				.iter()
+				.any(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":heart:"))
+		);
+		state.premium_type = 2;
+		menu.refresh(&state, Id(1), "hi :he", Some(6), &[]);
+		assert!(menu.candidates.iter().any(|c| c.id() == Id(9001)));
+		menu.hide_nitro_emojis = false;
 		menu.refresh(&state, Id(1), ":+1", Some(3), &[]);
 		assert!(menu.candidates.iter().any(|candidate| matches!(
 			candidate,
@@ -1438,6 +1598,66 @@ mod tests {
 			}
 		)));
 	}
+}
+
+#[cfg(all(debug_assertions, feature = "demo"))]
+pub(crate) fn debug_image_completion(state: &mut State) -> String {
+	let channel = state.selected.unwrap();
+	let premium = state.premium_type;
+	let mut fallback = String::new();
+	for entitlement in 0..=3 {
+		state.premium_type = entitlement;
+		for target in [channel, Id(22)] {
+			for (query, id, name, animated) in [
+				(":serein_pa", Id(9002), "serein_party", true),
+				(":serein_wa", Id(9001), "serein_wave", false),
+			] {
+				let mut menu = Menu::default();
+				menu.refresh(state, target, query, Some(query.chars().count()), &[]);
+				let image = entitlement == 0 && (animated || target != channel);
+				let expected = if image {
+					format!(
+						"{} ",
+						model::ImageShare::Emoji { id, animated }
+							.markdown(name)
+							.unwrap()
+					)
+				} else {
+					format!("<{}:{name}:{id}> ", if animated { "a" } else { "" })
+				};
+				for key in [egui::Key::Tab, egui::Key::Enter] {
+					let ctx = egui::Context::default();
+					let output = ctx.run_ui(
+						egui::RawInput {
+							events: vec![egui::Event::Key {
+								key,
+								physical_key: None,
+								pressed: true,
+								repeat: false,
+								modifiers: Default::default(),
+							}],
+							..Default::default()
+						},
+						|_| {
+							let mut draft = query.to_owned();
+							let pick = menu.keys(&ctx).expect("emoji completion");
+							assert_eq!(
+								insert(&mut draft, pick, false),
+								Some(expected.chars().count())
+							);
+							assert_eq!(draft, expected);
+						},
+					);
+					output.drop_without_applying_deltas();
+				}
+				if entitlement == 0 && target == channel && animated {
+					fallback = expected.trim_end().into();
+				}
+			}
+		}
+	}
+	state.premium_type = premium;
+	fallback
 }
 
 #[cfg(debug_assertions)]
@@ -1485,7 +1705,7 @@ pub(crate) fn debug_pointer_check(state: &mut State, channel: Id) {
 						initialized = true;
 						edit.cursor
 							.set_char_range(Some(egui::text::CCursorRange::one(
-								egui::text::CCursor::new(draft.chars().count()),
+								egui::text::CCursor::end_of_str(draft),
 							)));
 						edit.store(&ctx, editor);
 					}
@@ -1653,6 +1873,8 @@ pub fn debug_role_mentions_check(state: &mut State) {
 		name: "Role check".into(),
 		bits: 0,
 		color: 0xe67e22,
+		secondary_color: None,
+		tertiary_color: None,
 		position: 1,
 		hoist: false,
 	});
@@ -1832,10 +2054,7 @@ pub fn debug_role_mentions_check(state: &mut State) {
 						);
 						return 1;
 					}
-					usize::from(matches!(
-						value.as_str(),
-						"#Thread with spaces" | "#Forum check"
-					))
+					usize::from(matches!(value.trim(), "Thread with spaces" | "Forum check"))
 				}
 				egui::Shape::Vec(shapes) => {
 					shapes.iter().map(|shape| count(shape, role_color)).sum()

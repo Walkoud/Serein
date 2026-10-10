@@ -7,8 +7,11 @@ preferences. Outer position is saved in physical pixels where the window system
 supports it (including Linux X11); disconnected-monitor positions are ignored.
 Restoration fits the complete outer window to the selected monitor's dimensions,
 shrinking it and moving it inward when the display has become smaller. The normal
-minimum size is relaxed if necessary to fit that display.
+minimum size is relaxed if necessary to fit that display and recalculated when
+the window moves or its native scale changes, restoring 760 × 520 logical pixels
+when the current display can accommodate the window and its decorations.
 Minimized, hidden, maximized and fullscreen states do not replace normal geometry.
+Closing frames do not overwrite the saved geometry.
 The offline `--demo` ignores saved geometry and does not save its window state.
 
 Wayland does not expose global window coordinates to ordinary clients, so window
@@ -346,12 +349,15 @@ an official client remain unverified.
 
 ## Additional macOS attachment codecs
 
-WebM and MOV codecs unavailable in the native inline decoder can use an installed
+WebM, MOV and MP4 codecs unavailable in the native inline decoder can use an installed
 FFmpeg from `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`. Nothing is installed
 automatically. The helper must include H.264 (`libx264`) and AAC encoding; converted
 video plays through the existing native controls. Conversion may take up to two
 minutes before playback and is limited to 100 MiB input/output, 1080p and two hours.
-Missing FFmpeg or conversion failures appear in the video card. Linux and Windows
+Native format failures during opening or playback retry conversion once, resuming at
+the last displayed position. Sources above the native 1080p limit also use this
+bounded downscaling path. AAC track timestamps need not use the audio sample rate
+as their timescale. Missing FFmpeg or conversion failures appear in the video card. Linux and Windows
 continue to use their installed native codecs. This optional fallback is not bundled
 in release packages; actual codec coverage depends on the local FFmpeg build.
 Windows passes MPEG-4/MOV and WebM/Matroska attachments to Media Foundation; a recognized

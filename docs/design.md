@@ -74,7 +74,9 @@ The bundled faces remain upstream's hinted TrueType builds. See `assets/README.m
 ## Layout
 
 - 36px title strip (`base`): hidden native title bar on macOS with traffic lights inline, centred
-  context title, session status text and an OFFLINE PREVIEW / EXPERIMENTAL pill. Windows and macOS General
+  context title, session status text and an OFFLINE PREVIEW / EXPERIMENTAL pill. Eframe centres the
+  native macOS buttons in the active title strip every frame, including after resizing or zooming;
+  sign-in and login use their taller headers. Windows and macOS General
   settings can hide the app strip and use native window decorations instead. Linux always omits
   the app strip and defaults to system decorations, with the Adwaita Wayland fallback on GNOME.
   General → Window can hide Linux decorations immediately for tiling window managers; the
@@ -105,10 +107,29 @@ pages keep their existing status treatment; pending messages suppress the welcom
 `--features demo -- --demo --demo-empty-channel` previews this state offline;
 `--demo-empty-channel-long` exercises a long Unicode name and `--demo-light` selects light mode.
 
+Channel references and bare Discord message links share one inline pill. The leading icon
+distinguishes text, announcement, voice, thread, forum, forum post, direct and group
+conversations; message links append a chevron and message glyph, or the post name for forum
+posts, and links to another joined server lead with its icon and name. Pills wrap like text,
+keep one hit region per row and one keyboard stop, and expose a localized accessible label.
+Destination names come only from metadata the session may view and read; hidden or unknown
+targets show `unknown-channel` or `unknown-conversation`. Untrusted names are sanitized and
+bounded before layout. Masked links retain their text, inline/fenced code stays literal, and
+hidden spoilers remain concealed. Drag selection copies a link pill's original URL, and two
+adjacent copies of the same URL stay separate. Click, Enter and Space activate native
+navigation; the timeline centers and briefly highlights the exact target.
+`--features demo -- --demo --demo-message-links` exercises these states with an offline
+fixture; `--demo-light` selects the light appearance.
+
 Icons are [Phosphor Icons](https://phosphoricons.com) 2.1.1 (MIT) in the fill/bold weights,
 rasterized once into `assets/icons/atlas.png` (37 white glyphs in 64px cells) and tinted at
 draw time by `crates/ui/src/icons.rs`; there is no icon font. Provenance and the regeneration
 command are in `assets/icons/README.md`. The profile popout keeps its 300px Discord-style card.
+
+Shortcut capture also accepts egui's browser, media and system keys, including Caps Lock,
+Pause and the macOS Fn key, when the OS delivers them to the focused window. These bindings
+persist through the existing device settings. Global availability remains limited by the
+native shortcut adapter; unsupported global bindings continue to work while Serein is focused.
 
 Voice follows Discord's call screens: a black stage with 80px participant avatars (DM calls,
 above the conversation) or 16:9 tiles with name badges (guild channels), a bottom control bar

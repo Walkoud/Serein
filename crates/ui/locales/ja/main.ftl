@@ -87,6 +87,11 @@ search-conversation = この会話を検索
 show-member-list = メンバーリストを表示
 pinned-messages = 固定メッセージ
 threads = スレッド
+
+channel-pill-thread = スレッド
+channel-pill-forum = フォーラム
+channel-pill-post = 投稿
+channel-pill-message = メッセージ
 reload-history = 履歴のリロード
 in-a-call = 通話中
 members-description = この会話にアクセスできる全員。
@@ -299,6 +304,7 @@ attachments-media-menu-unavailable-for-synthetic-attachments = 合成アタッ�
 attachments-open-original-open-original = オリジナルを開く…
 # Context: pending_card
 attachments-pending-card-remove-attachment = 添付ファイルを削除する
+attachments-loading-card-preparing = 準備中…
 # Context: show_status
 attachments-show-status-cancel-download = ダウンロードをキャンセルする
 # Context: show_status
@@ -377,6 +383,18 @@ channel-list-heading-direct-messages = ダイレクトメッセージ
 channel-list-heading-favorites = お気に入り
 # Context: key
 channel-list-heading-pinned = 固定された
+# Context: key
+channel-list-heading-message-requests = メッセージリクエスト
+# Context: label
+message-request-ignore-tooltip = リクエストを無視
+# Context: label
+message-request-accept = 承認
+# Context: label
+message-request-ignore = 無視
+# Context: label
+message-request-banner = この人はまだフレンドではありません。承認するとダイレクトメッセージに移動します。
+# Context: label
+message-request-title = メッセージリクエスト
 
 ## crates/ui/src/channel_menu.rs
 # Context: context
@@ -810,6 +828,10 @@ emoji-picker-gif-body-searching-klipy = KLIPYを検索中…
 # Context: gif_body
 emoji-picker-gif-body-trending-gifs = トレンドのGIF
 # Context: gif_body
+emoji-picker-gif-body-retry = 再試行
+# Context: gif_body
+emoji-picker-gif-body-no-trending-gifs-right-now = GIFを検索するか、後でもう一度お試しください。
+# Context: gif_body
 emoji-picker-gif-body-try-a-different-search-term = 別の検索語を試してください。
 # Context: gif_grid
 emoji-picker-gif-grid-favorite = お気に入り
@@ -835,6 +857,8 @@ emoji-picker-popup-hover-an-emoji-to-preview-it = 絵文字にカーソルを合
 emoji-picker-popup-no-matching-emoji = 一致する絵文字がありません。
 # Context: popup
 emoji-picker-popup-retry-sticker-packs = リトライステッカーパック
+# Context: popup
+emoji-picker-popup-requires-nitro = ここで使うにはNitroが必要です
 # Context: popup
 emoji-picker-popup-search-results = 検索結果
 # Context: popup
@@ -1009,7 +1033,7 @@ fonts-show-reset = リセット
 # Context: show
 fonts-show-the-quick-brown-fox-jumps-over-the-lazy-dog-0123456789 = 素早い茶色のキツネが怠惰な犬を飛び越えます。 0123456789
 # Context: show
-fonts-show-ttf-or-otf-up-to-8-mib-saved-on-this = TTF または OTF、最大 8 MiB。このデバイスに保存されます。コードは等幅フォントを維持します。
+fonts-show-ttf-or-otf-up-to-32-mib-saved-on-this = TTF または OTF、最大 32 MiB。このデバイスに保存されます。コードは等幅フォントを維持します。
 # Context: show
 fonts-show-typography = タイポグラフィ
 
@@ -1668,7 +1692,6 @@ markdown-show-run-open-user-profile = ユーザープロフィールを開く
 # Context: show_run
 markdown-show-run-reveal-spoiler = スポイラーを明らかにする
 # Context: show_run
-markdown-show-run-unknown-channel-load-channel = 不明なチャネル、ロードチャネル
 
 ## crates/ui/src/mentions.rs
 # Context: show
@@ -2051,6 +2074,20 @@ profiles-more-menu-add-friend-nickname = 友達のニックネームを追加
 profiles-more-menu-add-note = メモを追加
 # Context: more_menu
 profiles-more-menu-block = ブロック
+profiles-view-full-profile = プロフィール全体を表示
+profiles-copy-username = ユーザー名をコピー
+profiles-username-unavailable = プロフィールを開くとユーザー名を読み込みます
+profiles-ignore = 無視する
+profiles-unignore = 無視を解除
+profiles-ignore-hint = ブロックせずにDiscordの無視設定を使います。相手には通知されません。
+profiles-report-user-profile = ユーザープロフィールを報告
+profiles-report-hint = ブラウザでDiscordのサポートフォームを開き、ユーザーIDをコピーします
+profiles-show-activity = アクティビティ
+profiles-show-connections = 接続
+profiles-show-friends-since = フレンドになった日
+profiles-show-note = メモ
+profiles-show-note-hint = クリックしてメモを追加
+profiles-show-note-only-you = あなただけに表示されます
 # Context: more_menu
 profiles-more-menu-copy-webhook-id = Webhook ID をコピーする
 # Context: more_menu
@@ -2119,6 +2156,8 @@ profiles-show-view-profile-picture = プロフィール写真を見る
 ## crates/ui/src/reactions.rs
 # Context: add_button
 reactions-add-button-add-reaction = リアクションを追加
+# Context: quick_button
+reactions-quick-react = { $emoji } でリアクション
 # Context: show
 reactions-show-reactions-unavailable = 反応がありません
 # Context: show
@@ -3440,6 +3479,12 @@ settings-chat-settings-channel-list = チャンネルリスト
 settings-chat-settings-show-channels-you-cannot-currently-access = 現在アクセスできないチャンネルを表示します。
 # Context: chat_settings
 settings-chat-settings-show-hidden-channels = 隠しチャンネルを表示する
+# Context: chat_settings
+settings-chat-settings-emoji = 絵文字
+# Context: chat_settings
+settings-chat-settings-suggest-nitro-emojis = Nitroが必要な絵文字を候補に表示
+# Context: chat_settings
+settings-chat-settings-suggest-nitro-emojis-description = Nitroがなくても、アニメーション絵文字や他のサーバーの絵文字を : の候補とピッカーに表示します。オフにすると候補から隠され、ピッカーではロックされます。
 # Context: close_control
 settings-close-control-close-settings-esc = 設定を閉じる (Esc)
 # Context: colour_preset_settings
@@ -3738,6 +3783,10 @@ timeline-loading-messages-loading-messages = メッセージをロードして�
 # Context: message_actions
 timeline-message-actions-copy = コピー
 # Context: message_actions
+timeline-message-actions-copy-message-id = メッセージIDをコピー
+# Context: message_actions
+timeline-message-actions-copy-message-link = メッセージリンクをコピー
+# Context: message_actions
 timeline-message-actions-create-thread = スレッドを作成…
 # Context: message_actions
 timeline-message-actions-delete-message = メッセージを削除…
@@ -3784,7 +3833,6 @@ timeline-show-with-scroll-edited = (編集済み)
 # Context: show_with_scroll
 timeline-show-with-scroll-forwarded = ↪ 転送されました
 # Context: show_with_scroll
-timeline-show-with-scroll-hide-spoilers = ネタバレを隠す
 # Context: show_with_scroll
 timeline-show-with-scroll-history-is-not-available-yet-use-reload-to-try-again = 履歴はまだ利用できません。リロードを使用して再試行してください。
 # Context: show_with_scroll
@@ -4438,3 +4486,13 @@ screen-macos-system-picker = macOSのシステム選択画面で選ぶ
 screen-macos-system-picker-kind = システムのコンテンツ選択
 
 member-in-voice = ボイスチャット中
+
+profiles-board = Board
+profiles-board-unavailable = This profile’s board is unavailable.
+profiles-board-empty = No games on this board yet.
+profiles-board-show-more = Show more
+profiles-board-show-less = Show less
+profiles-activity-empty = 共有されているアクティビティはありません。
+profiles-mutuals-empty = Nothing to show here.
+
+reading-double-click-reaction = Double-click reaction

@@ -1,6 +1,8 @@
 //! Handcrafted synthetic data. No network imports; never evidence of live compatibility.
 use client_core::{Envelope, Event, State};
 use model::*;
+mod message_links;
+pub use message_links::{load_message_link_page, message_links_demo_state};
 /// Synthetic Tenor-shaped results. Previews under `/synthetic/` are painted locally; no request.
 pub fn gif_page(query: Option<&str>) -> model::GifPage {
 	const TITLES: [&str; 12] = [
@@ -975,6 +977,8 @@ pub fn seed_access_marks(state: &mut State) {
 				bits: 0,
 				name: "Contributors".into(),
 				color: 0,
+				secondary_color: None,
+				tertiary_color: None,
 				position: 1,
 				hoist: false,
 			});
@@ -1078,6 +1082,8 @@ pub fn chat_demo_state() -> State {
 				name: "Synthetic colored role".into(),
 				bits: 0,
 				color: 0x68ada4,
+				secondary_color: None,
+				tertiary_color: None,
 				position: 1,
 				hoist: false,
 			},
@@ -1223,6 +1229,8 @@ pub fn permission_snapshot(state: &State) -> model::permissions::Snapshot {
 				roles: Some(vec![p::Role {
 					name: String::new(),
 					color: 0,
+					secondary_color: None,
+					tertiary_color: None,
 					position: 0,
 					hoist: false,
 					id: guild.id,
