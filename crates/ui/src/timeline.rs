@@ -1775,6 +1775,14 @@ impl TimelineView {
 				following,
 				anchor: restored.and_then(|cursor| cursor.message.map(|id| (id, cursor.inset))),
 				download: std::mem::take(&mut self.download),
+				// Posters survive the switch so idle stages repaint from cache.
+				// Playback still halts: the unseen player hits the idle stop.
+				video: {
+					let mut video = std::mem::take(&mut self.video);
+					video.stop();
+					video.command = None;
+					video
+				},
 				opening: self.opening.take(),
 				browser_opening: self.browser_opening.take(),
 				pending_viewer: self.pending_viewer.take(),
@@ -5014,6 +5022,54 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	#[test]
+	fn channel_switch_keeps_video_posters_but_stops_playback() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		let mut state = loading_unread_channel(false);
+		state.freshness = model::Freshness::Fresh;
+		state.history_pending = false;
+		let mut view = TimelineView::default();
+		banner_frame(&ctx, &mut view, &mut state, vec![], false);
+		let attachment = model::Attachment {
+			id: Id(10),
+			filename: "clip.mp4".into(),
+			description: None,
+			content_type: Some("video/mp4".into()),
+			size: 128,
+			media: model::EmbedMedia {
+				width: 720,
+				height: 1280,
+				..Default::default()
+			},
+			spoiler: false,
+			duration_ms: None,
+			waveform: vec![],
+		};
+		assert!(
+			view.video
+				.accept_poster(&ctx, Id(10), 2, 1, &[1, 1, 1, 255, 2, 2, 2, 255])
+		);
+		view.video.active = Some((Id(20), Id(20), attachment));
+		view.video.state = crate::video::VideoState::Playing;
+		let mut channel = state.channels[0].clone();
+		channel.id = Id(21);
+		state.channels.push(channel);
+		state.selected = Some(Id(21));
+		banner_frame(&ctx, &mut view, &mut state, vec![], false);
+		assert!(
+			view.video.posters.contains_key(&Id(10)),
+			"posters survive channel switches"
+		);
+		assert!(view.video.poster_seen.contains(&Id(10)));
+		assert!(
+			view.video.active.is_none(),
+			"switching channels stops playback"
+		);
+		assert_eq!(view.video.state, crate::video::VideoState::Idle);
+		assert!(view.video.command.is_none());
 	}
 
 	#[test]

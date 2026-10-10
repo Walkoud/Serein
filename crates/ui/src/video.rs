@@ -48,13 +48,13 @@ pub struct VideoUi {
 	shade: Option<egui::TextureHandle>,
 	/// Decoded first frames by attachment id, painted on idle stages instead of
 	/// black. Byte-bounded below; Discord ships no video placeholders to reuse.
-	posters: HashMap<Id, (egui::TextureHandle, usize)>,
+	pub(crate) posters: HashMap<Id, (egui::TextureHandle, usize)>,
 	/// Oldest-first poster insertion order for budget eviction.
 	poster_order: VecDeque<Id>,
 	/// Live poster bytes against [`POSTER_BUDGET`].
 	poster_bytes: usize,
 	/// Attachments already asked (or answered) for a poster; no retry until eviction.
-	poster_seen: HashSet<Id>,
+	pub(crate) poster_seen: HashSet<Id>,
 	/// Keyboard focus rested on an overlay control last frame, so keep the overlay visible.
 	controls_focused: bool,
 	/// Keep the viewport's previous mode so leaving playback restores the window.
